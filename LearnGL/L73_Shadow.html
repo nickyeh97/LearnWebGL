@@ -1,0 +1,407 @@
+<head>
+  <meta charset="utf-8" />
+  <title>Shadow</title>
+</head>
+  <div id="uiContainer">
+    <div id="ui">
+      <div id="LIGHT_X"></div>
+      <div id="LIGHT_Y"></div>
+      <div id="LIGHT_Z"></div>
+    </div>
+  </div>
+<script src="https://webglfundamentals.org/webgl/resources/webgl-lessons-ui.js"></script>
+<script src="./cuon-utils.js"></script>
+<script src="./cuon-matrix.js"></script>
+<script>
+    window.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 720;
+        document.body.append(canvas);
+        const gl = canvas.getContext('webgl');
+        // Size of off screen
+        const OFFSCREEN_WIDTH = 2048;
+        const OFFSCREEN_HEIGHT = 2048;
+        // Position of the light source
+        var LIGHT_X = 0, LIGHT_Y = 7, LIGHT_Z = 2; 
+
+        /**
+         * 我們需要兩個著色器來實現陰影
+         * shader1. 用來計算光源到物體的距離，並用一張 texture 將深度結果記錄起來
+         * shader2. 根據(1)中計算的距離繪製場景，並將(1)的 texture 結果傳到(2)中，來繪製畫面中的陰影
+         * 這張 紋理貼圖 就被稱作為 "陰影貼圖 (shadow/depth map)" 
+         * 而通過陰影貼圖實現陰影的方法就被稱為 "陰影映射 (shadow mapping)"
+         * 陰影映射 (shadow mapping) 包括以下兩步:
+         * 1. 將視點(eye-point)移到光源處，並運行(1)的 shader 。此時那些"將被繪出"的片元就是被光照射到的，即此格像素上位於最前面的片元。
+         * 我們不會畫出其片元的顏色，而是傳遞片元中的 z值(深度值)到 "陰影貼圖" (FBO.texture <- the depth buffer.)
+         * 2. 將視點(eye-point)移回原位置，運行(2)的 shader 。
+         * 此時每個片元在光源坐標系下的座標，與陰影貼圖中的Z值比較，前者大於後者，即代表片元處在陰影之中
+         * */
+        const vs = `
+            attribute vec4 a_Position;
+            attribute vec4 a_Color;
+            uniform mat4 u_MvpMatrix;
+            uniform mat4 u_MvpMatrixFromLight;
+            varying vec4 v_PositionFromLight;
+            varying vec4 v_Color;
+            void main() {
+                gl_Position = u_MvpMatrix * a_Position;
+                v_PositionFromLight = u_MvpMatrixFromLight * a_Position;
+                v_Color = a_Color;
+            }
+        `;
+
+        const fs = `
+            precision mediump float;
+            uniform sampler2D u_ShadowMap;
+            varying vec4 v_PositionFromLight;
+            varying vec4 v_Color;
+            float unpackDepth(const in vec4 rgbaDepth) {
+                const vec4 bitShift = vec4(1.0, 1.0/256.0, 1.0/(256.0*256.0), 1.0/(256.0*256.0*256.0));
+                float depth = dot(rgbaDepth, bitShift);
+                return depth;
+            }
+            void main() {
+                vec3 shadowCoord = (v_PositionFromLight.xyz/v_PositionFromLight.w)/2.0 + 0.5;
+                vec4 rgbaDepth = texture2D(u_ShadowMap, shadowCoord.xy);
+                // float depth = rgbaDepth.r;
+                float depth = unpackDepth(rgbaDepth);
+                float visibility = (shadowCoord.z > depth + 0.001) ? 0.7 : 1.0;
+                gl_FragColor = vec4(v_Color.rgb * visibility, v_Color.a);
+            }
+        `;
+
+        const SHADOW_VS = `
+            attribute vec4 a_Position;
+            uniform mat4 u_MvpMatrix;
+            void main() {
+                gl_Position = u_MvpMatrix * a_Position;
+            }
+        `;
+
+        // generator shadow map by depth
+        // 在提高精度後，Z值提高到 mediump float 精度為 2的負十次方 = 0.000976563
+        // 因此偏移量改為0.001 來消除馬赫帶
+        const SHADOW_FS = `
+            precision mediump float;
+            void main() {
+                const vec4 bitShift = vec4(1.0, 256.0, 256.0 * 256.0, 256.0 * 256.0 * 256.0);
+                const vec4 bitMask = vec4(1.0/256.0, 1.0/256.0, 1.0/256.0, 0.0);
+                vec4 rgbaDepth = fract(gl_FragCoord.z * bitShift);
+                rgbaDepth -= rgbaDepth.gbaa * bitMask;
+                gl_FragColor = rgbaDepth;
+            }
+        `;
+        
+        // Initialize shaders for generating a shadow map
+        const shadowProgram = createProgram(gl, SHADOW_VS, SHADOW_FS);
+        shadowProgram.a_Position = gl.getAttribLocation(shadowProgram, 'a_Position');
+        shadowProgram.u_MvpMatrix = gl.getUniformLocation(shadowProgram, 'u_MvpMatrix');
+
+        // Initialize shaders for regular drawing
+        const normalProgram = createProgram(gl, vs, fs);
+        normalProgram.a_Position = gl.getAttribLocation(normalProgram, 'a_Position');
+        normalProgram.a_Color = gl.getAttribLocation(normalProgram, 'a_Color');
+        normalProgram.u_MvpMatrix = gl.getUniformLocation(normalProgram, 'u_MvpMatrix');
+        normalProgram.u_MvpMatrixFromLight = gl.getUniformLocation(normalProgram, 'u_MvpMatrixFromLight');
+        normalProgram.u_ShadowMap = gl.getUniformLocation(normalProgram, 'u_ShadowMap');
+        if (normalProgram.a_Position < 0 || normalProgram.a_Color < 0 || !normalProgram.u_MvpMatrix ||
+            !normalProgram.u_MvpMatrixFromLight || !normalProgram.u_ShadowMap) {
+            console.log('Failed to get the storage location of attribute or uniform variable from normalProgram'); 
+            return;
+        }
+        
+        const triangle = initVertexBuffersForTriangle(gl);
+        const plane = initVertexBuffersForPlane(gl);
+        if (!triangle || !plane) {
+            console.log('Failed to set the vertex information');
+            return;
+        }
+        const fbo = initFramebufferObject(gl);
+        if (!fbo) {
+            console.log('Failed to initialize frame buffer object');
+            return;
+        }
+        // Set a texture object to the texture unit
+        gl.activeTexture(gl.TEXTURE1); 
+        gl.bindTexture(gl.TEXTURE_2D, fbo.texture);
+
+        // 設置 clear color 並開啟深度測試
+        gl.clearColor(0, 0, 0, 1);
+        gl.enable(gl.DEPTH_TEST);
+
+        // 準備視圖投影矩陣給 shadow map
+        const viewProjMatrixFromLight = new Matrix4(); 
+        viewProjMatrixFromLight.setPerspective(70.0, OFFSCREEN_WIDTH/OFFSCREEN_HEIGHT, 1.0, 100.0);
+        viewProjMatrixFromLight.lookAt(LIGHT_X, LIGHT_Y, LIGHT_Z, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+        // 準備視圖投影矩陣為渲染視點看到的畫面
+        const viewProjMatrix = new Matrix4();
+        // Do not forget set the fov bigger than 40
+        viewProjMatrix.setPerspective(50, canvas.width/canvas.height, 1.0, 100.0);
+        viewProjMatrix.lookAt(0.0, 7.0, 9.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+
+        // Start drawing
+        var currentAngle = 0.0;
+        // Coordinate transformation matrix
+        const g_modelMatrix = new Matrix4();
+        const g_mvpMatrix = new Matrix4();
+        // A model view projection matrix from light source (for triangle)
+        const mvpMatrixFromLight_t = new Matrix4();
+        // A model view projection matrix from light source (for plane) 
+        const mvpMatrixFromLight_p = new Matrix4();
+
+        const updateScene = () => {
+            currentAngle = animate(currentAngle);  
+            
+            renderpass(currentAngle);
+            
+            requestAnimationFrame(updateScene);
+        };;
+        requestAnimationFrame(updateScene);
+       
+        function renderpass(currentAngle) {
+            // pass 1 generate the shadow map
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);               // Change the drawing destination to FBO
+            gl.viewport(0, 0, OFFSCREEN_HEIGHT, OFFSCREEN_HEIGHT); // Set view port for FBO
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);   // Clear FBO    
+
+            // Set shaders for generating a shadow map
+            gl.useProgram(shadowProgram); 
+            // Draw the triangle and the plane (for generating a shadow map)
+            drawTriangle(shadowProgram, triangle, currentAngle, viewProjMatrixFromLight);
+            mvpMatrixFromLight_t.set(g_mvpMatrix); // Used later
+            drawPlane(shadowProgram, plane, viewProjMatrixFromLight);
+            mvpMatrixFromLight_p.set(g_mvpMatrix); // Used later
+
+            // pass 2 display
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);               // Change the drawing destination to color buffer
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);    // Clear color and depth buffer
+
+            // Set the shader for regular drawing
+            gl.useProgram(normalProgram);
+            gl.uniform1i(normalProgram.u_ShadowMap, 1);  // Pass 0 because gl.TEXTURE0 is enabledする
+            // Draw the triangle and plane ( for regular drawing)
+            gl.uniformMatrix4fv(normalProgram.u_MvpMatrixFromLight, false, mvpMatrixFromLight_t.elements);
+            drawTriangle(normalProgram, triangle, currentAngle, viewProjMatrix);
+            gl.uniformMatrix4fv(normalProgram.u_MvpMatrixFromLight, false, mvpMatrixFromLight_p.elements);
+            drawPlane(normalProgram, plane, viewProjMatrix);
+        }
+
+        function drawTriangle(program, triangle, angle, vpMatrix) {
+            g_modelMatrix.setRotate(angle, 0, 1, 0);
+            draw(program, triangle, vpMatrix);
+        }
+
+        function drawPlane(program, plane, vpMatrix) {
+            g_modelMatrix.setRotate(-45, 0, 1, 1);
+            draw(program, plane, vpMatrix);
+        }
+
+        function draw(program, o, vpMatrix) {
+            initAttributeVariable(gl, program.a_Position, o.vertexBuffer);
+            if (program.a_Color != undefined) // If a_Color is defined to attribute
+                initAttributeVariable(gl, program.a_Color, o.colorBuffer);
+
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, o.indexBuffer);
+
+            // Calculate the model view project matrix and pass it to u_MvpMatrix
+            g_mvpMatrix.set(vpMatrix);
+            g_mvpMatrix.multiply(g_modelMatrix);
+            gl.uniformMatrix4fv(program.u_MvpMatrix, false, g_mvpMatrix.elements);
+
+            gl.drawElements(gl.TRIANGLES, o.numIndices, gl.UNSIGNED_BYTE, 0);
+        }
+        
+        function initVertexBuffersForPlane(gl) {
+        // Create a plane
+        //  v1------v0
+        //  |        | 
+        //  |        |
+        //  |        |
+        //  v2------v3
+
+        // Vertex coordinates
+        var vertices = new Float32Array([
+            3.0, -1.7, 2.5,  -3.0, -1.7, 2.5,  -3.0, -1.7, -2.5,   3.0, -1.7, -2.5    // v0-v1-v2-v3
+        ]);
+
+        // Colors
+        var colors = new Float32Array([
+            1.0, 1.0, 1.0,    1.0, 1.0, 1.0,  1.0, 1.0, 1.0,   1.0, 1.0, 1.0
+        ]);
+
+        // Indices of the vertices
+        var indices = new Uint8Array([0, 1, 2,   0, 2, 3]);
+
+        var o = new Object(); // Utilize Object object to return multiple buffer objects together
+
+        // Write vertex information to buffer object
+        o.vertexBuffer = initArrayBufferForLaterUse(gl, vertices, 3, gl.FLOAT);
+        o.colorBuffer = initArrayBufferForLaterUse(gl, colors, 3, gl.FLOAT);
+        o.indexBuffer = initElementArrayBufferForLaterUse(gl, indices, gl.UNSIGNED_BYTE);
+        if (!o.vertexBuffer || !o.colorBuffer || !o.indexBuffer) return null; 
+
+        o.numIndices = indices.length;
+
+        // Unbind the buffer object
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+        return o;
+        }
+
+        function initVertexBuffersForTriangle(gl) {
+        // Create a triangle
+        //       v2
+        //      / | 
+        //     /  |
+        //    /   |
+        //  v0----v1
+
+        // Vertex coordinates
+        var vertices = new Float32Array([-0.8, 3.5, 0.0,  0.8, 3.5, 0.0,  0.0, 3.5, 1.8]);
+        // Colors
+        var colors = new Float32Array([1.0, 0.5, 0.0,  1.0, 0.5, 0.0,  1.0, 0.0, 0.0]);    
+        // Indices of the vertices
+        var indices = new Uint8Array([0, 1, 2]);
+
+        var o = new Object();  // Utilize Object object to return multiple buffer objects together
+
+        // Write vertex information to buffer object
+        o.vertexBuffer = initArrayBufferForLaterUse(gl, vertices, 3, gl.FLOAT);
+        o.colorBuffer = initArrayBufferForLaterUse(gl, colors, 3, gl.FLOAT);
+        o.indexBuffer = initElementArrayBufferForLaterUse(gl, indices, gl.UNSIGNED_BYTE);
+        if (!o.vertexBuffer || !o.colorBuffer || !o.indexBuffer) return null; 
+
+        o.numIndices = indices.length;
+
+        // Unbind the buffer object
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+
+        return o;
+        }
+        
+        function initFramebufferObject(gl) {
+            var framebuffer, texture, depthBuffer;
+            // Define the error handling function
+            var error = function() {
+                if (framebuffer) gl.deleteFramebuffer(framebuffer);
+                if (texture) gl.deleteTexture(texture);
+                if (depthBuffer) gl.deleteRenderbuffer(depthBuffer);
+                return null;
+            }
+
+            // 1. Create a frame buffer object (FBO)
+            framebuffer = gl.createFramebuffer();
+            if (!framebuffer) {
+                console.log('Failed to create frame buffer object');
+                return error();
+            }
+            // 2. Create a texture object and set its size and parameters
+            texture = gl.createTexture();
+            if (!texture) {
+                console.log('Failed to create texture object');
+                return error();
+            }
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, OFFSCREEN_WIDTH, OFFSCREEN_HEIGHT, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            
+            // 3. Create a renderbuffer object
+            depthBuffer = gl.createRenderbuffer();
+            if (!depthBuffer) {
+                console.log('Failed to create renderbuffer object');
+                return error();
+            }
+            // 4. Bind the renderbuffer object to the target and set its size
+            gl.bindRenderbuffer(gl.RENDERBUFFER, depthBuffer); // Bind the object to target
+            gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, OFFSCREEN_WIDTH, OFFSCREEN_HEIGHT);
+            // 5. Attach the texture object to the color attachment of the framebuffer object
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            // WebGL COLOR_ATTACHMENT only cab be COLOR_ATTACHMENT0, OpenGL can be more (COLOR_ATTACHMENT0~8)
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+            // 6. Attach the renderbuffer object to the depth attachment of the framebuffer object
+            gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depthBuffer);
+            // 7. Check if FBO is configured correctly
+            var e = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (gl.FRAMEBUFFER_COMPLETE !== e) {
+                console.log('Frame buffer object is incomplete: ' + e.toString());
+                return error();
+            }
+
+            // Store the texture object into FBO
+            framebuffer.texture = texture; 
+
+            // Unbind the buffer object
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.bindTexture(gl.TEXTURE_2D, null);
+            gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+
+            return framebuffer;
+        }
+
+        // thinking it just like standard lib func
+        function initArrayBufferForLaterUse(gl, data, num, type) {
+            var buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+            buffer.num = num;
+            buffer.type = type;
+            return buffer;
+        }
+        // thinking it just like standard lib func
+        function initElementArrayBufferForLaterUse(gl, data, type) {
+            var buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
+
+            buffer.type = type;
+            return buffer;
+        }
+        // thinking it just like standard lib func
+        var last = Date.now();
+        const ANGLE_STEP = 30;
+        function animate(angle) {
+            var elapsed = Date.now() - last;
+            last = Date.now();
+            var newAngle = angle + (ANGLE_STEP * elapsed) / 1000.0;
+            return newAngle % 360;
+        }
+        // thinking it just like standard lib func
+        function initAttributeVariable(gl, a_attribute, buffer) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.vertexAttribPointer(a_attribute, buffer.num, buffer.type, false, 0, 0);
+            gl.enableVertexAttribArray(a_attribute);
+        }
+
+        // Setup a ui.
+        webglLessonsUI.setupSlider("#LIGHT_X", {value: LIGHT_X, slide: updateLIGHT(0), min: -10, max: 10, step: 0.1, precision: 1});
+        webglLessonsUI.setupSlider("#LIGHT_Y", {value: LIGHT_Y, slide: updateLIGHT(1), min: 10, max: 150, step: 1, precision: 1});
+        webglLessonsUI.setupSlider("#LIGHT_Z", {value: LIGHT_Z, slide: updateLIGHT(2), min: -10, max: 10, step: 0.1, precision: 1});
+
+        function updateLIGHT(index) {
+            return function(event, ui) {                
+                switch (index) {
+                    case 0:
+                        LIGHT_X = ui.value;
+                        break;
+                    case 1:
+                        LIGHT_Y = ui.value;
+                        break;
+                    case 2:
+                        LIGHT_Z = ui.value;
+                        break;
+                    default:
+                        console.error("Not this kind of parament");
+                        break;
+                }
+                viewProjMatrixFromLight.setPerspective(70.0, OFFSCREEN_WIDTH/OFFSCREEN_HEIGHT, 1.0, 100.0);
+                viewProjMatrixFromLight.lookAt(LIGHT_X, LIGHT_Y, LIGHT_Z, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+                renderpass(currentAngle);
+            };
+        }
+    }
+</script>

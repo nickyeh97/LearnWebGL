@@ -1,0 +1,35 @@
+<script src="./cuon-utils.js"></script>
+<script>
+    window.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 640;
+        document.body.append(canvas);
+        const gl = canvas.getContext('webgl');
+
+        const vs = `
+            attribute vec4 a_Position;
+            void main() {
+                gl_Position = a_Position;
+                gl_PointSize = 5.0;
+            }
+        `;
+
+        const fs = `
+            void main() {
+                gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+            }
+        `;
+
+        initShaders(gl, vs, fs);
+
+        let a_Position = gl.getAttribLocation(gl.program, 'a_Position');
+
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        for (let i = 0; i < 10; i++) {
+            gl.vertexAttrib3f(a_Position, i * 0.1 - 1.0, 0.0, 0.0); // 改變x軸 position
+            gl.drawArrays(gl.POINTS, 0, 1);
+        }
+    }
+</script>

@@ -1,0 +1,80 @@
+<script src="./cuon-utils.js"></script>
+<script>
+    window.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = 640;
+        document.body.append(canvas);
+        const gl = canvas.getContext('webgl');
+
+        const vs = `
+            attribute vec4 a_Position;
+            attribute vec4 a_Color;
+            varying vec4 v_Color; // 作用是頂點著色器向片元著色器傳輸資料
+            void main() {
+                gl_Position = a_Position;
+                gl_PointSize = 10.0;
+                v_Color = a_Color;
+            }
+        `;
+
+        const fs = `
+            precision mediump float; // 設置中等精度
+            varying vec4 v_Color;
+            void main() {
+                gl_FragColor = v_Color;
+            }
+        `;
+
+        initShaders(gl, vs, fs);
+
+        // set vertices pos
+        let n = initVertexBuffers(gl);
+        if (n < 0) {
+            console.log("Failed to set vertices!");
+            return;
+        }
+
+        gl.clearColor(0.0, 0.0, 0.0, 0.7);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.drawArrays(gl.POINTS, 0, n);
+        // 改用 緩重區物件 一次提交多個頂點資料
+        function initVertexBuffers(gl) {
+            const vertices = new Float32Array([
+                -1.0, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.9, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.8, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.7, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.6, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.5, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.4, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.3, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.2, 0.0, Math.random(), Math.random(), Math.random(),
+                -0.1, 0.0, Math.random(), Math.random(), Math.random(),
+                0.0, 0.0, Math.random(), Math.random(), Math.random(),
+                0.1, 0.0, Math.random(), Math.random(), Math.random(),
+            ])
+            const len = vertices.length / 5;
+            // creating BO
+            const vertexBuffer = gl.createBuffer();
+            if(!vertexBuffer) return -1;
+            // Binding BO
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+            // write in data to BO
+            gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+            const a_Position = gl.getAttribLocation(gl.program, 'a_Position');
+
+            const FSIZE = vertices.BYTES_PER_ELEMENT;
+
+            // 將緩衝區對象分配給 a_Position 變量
+            gl.vertexAttribPointer(a_Position, 2, gl.FLOAT, false, FSIZE * 5, 0);
+            // 連接 a_Position 變量與分配給他的緩衝區對象, 使分配生效
+            gl.enableVertexAttribArray(a_Position)
+
+            const a_Color = gl.getAttribLocation(gl.program, 'a_Color');
+            gl.vertexAttribPointer(a_Color, 3, gl.FLOAT, false, FSIZE * 5, FSIZE * 2);
+            gl.enableVertexAttribArray(a_Color);
+            return len;
+        }
+    }
+</script>
